@@ -1,0 +1,29 @@
+# ── Node / React ──
+/node_modules
+/build
+/coverage
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── Python / FastAPI backend ──
+backend/.venv/
+backend/**/__pycache__/
+*.py[cod]
+backend/football.db
+backend/*.db
+
+# ── Modeli (artefakti se generiraju treniranjem, ne verzioniraju se) ──
+backend/models/*.joblib
+backend/models/metrics.json
+
+# ── Tajne ──
+.env
+.env.*
+!.env.example
+backend/.env
+
+# ── Ostalo ──
+.DS_Store
+.idea/
+.vscode/
