@@ -22,9 +22,13 @@ SEED_DB = BASE_DIR / "football.db"
 def _seed_sqlite() -> None:
     """Na prvom pokretanju kopira priloženu bazu na volumen (npr. /data).
 
+    Radi samo uz SEED_SQLITE=true.
+
     Volumen je na početku prazan; bez ovoga bi produkcija krenula s praznom
     bazom, a sve što scheduler kasnije upiše ostaje sačuvano između deployova.
     """
+    if not settings.seed_sqlite:
+        return
     url = make_url(settings.sqlalchemy_url)
     if url.get_backend_name() != "sqlite" or not url.database:
         return

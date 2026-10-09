@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db import get_db
 from app.ml.dataset import build_serving_matrix
+from app.ml.prospective import evaluate_prospective
 from app.models import Fixture, IngestLog, Injury, League, Odd, Team
 from app.schemas import MatchesResponse, StatusResponse
 from app.services import predictions as pred_service
@@ -238,6 +239,21 @@ def get_status(db: Session = Depends(get_db)) -> StatusResponse:
         scheduler=scheduler_status(),
         training_ready=finished >= MIN_ROWS_FOR_TRAINING,
     )
+
+
+@router.get("/evaluation")
+def get_evaluation(
+    db: Session = Depends(get_db),
+    days: int | None = Query(default=None, ge=1, le=365, description="Samo zadnjih N dana"),
+) -> dict:
+    """Prospektivna evaluacija: predikcije spremljene prije utakmice naspram ishoda.
+
+    Uz nju se vraćaju i retrospektivne metrike istreniranog modela (test skup
+    nakon kronološke granice), da se dva broja mogu izravno usporediti.
+    """
+    report = evaluate_prospective(db, days)
+    report["retrospective"] = pred_service.model_info()
+    return report
 
 
 @router.get("/leagues")

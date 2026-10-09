@@ -84,6 +84,23 @@ TARGETS = {
 }
 
 
+def drop_duplicate_fixtures(fixtures: pd.DataFrame) -> pd.DataFrame:
+    """Uklanja utakmice koje API vodi dvaput pod različitim ID-jem.
+
+    Ista utakmica (isti domaćin, gost i termin) ponekad postoji u dva
+    natjecanja ili pod starim i novim ID-jem. U formi bi se tada brojala
+    dvaput, a u skupu za treniranje bila bi dva jednaka primjera. Zadržava se
+    zapis s najmanjim ID-jem, s prednošću odigranog.
+    """
+    if fixtures.empty:
+        return fixtures
+    order = fixtures.assign(_played=fixtures["home_goals"].notna()).sort_values(
+        ["_played", "fixture_id"], ascending=[False, True], kind="mergesort"
+    )
+    kept = order.drop_duplicates(["home_team_id", "away_team_id", "kickoff"], keep="first")
+    return fixtures.loc[fixtures.index.isin(kept.index)]
+
+
 # ═══════════════════════════════════════════════════════════════
 # 1. Dugački oblik: jedan redak po (momčad, utakmica)
 # ═══════════════════════════════════════════════════════════════
@@ -129,7 +146,7 @@ def to_long_frame(fixtures: pd.DataFrame) -> pd.DataFrame:
     long["fts"] = (long["gf"] == 0).astype(float)          # failed to score
     long["pts"] = np.where(long["gf"] > long["ga"], 3.0, np.where(long["gf"] == long["ga"], 1.0, 0.0))
 
-    return long.sort_values(["team_id", "kickoff"]).reset_index(drop=True)
+    return long.sort_values(["team_id", "kickoff", "fixture_id"], kind="mergesort").reset_index(drop=True)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -146,7 +163,7 @@ def _rolling_state(long: pd.DataFrame, window: int) -> pd.DataFrame:
         cols = ["team_id", "kickoff", *[f"f_{s}" for s in BASE_STATS], "f_n"]
         return pd.DataFrame(columns=cols)
 
-    long = long.sort_values(["team_id", "kickoff"]).reset_index(drop=True)
+    long = long.sort_values(["team_id", "kickoff", "fixture_id"], kind="mergesort").reset_index(drop=True)
     grouped = long.groupby("team_id", sort=False)
     out = long[["team_id", "kickoff"]].copy()
 
@@ -162,7 +179,10 @@ def _rolling_state(long: pd.DataFrame, window: int) -> pd.DataFrame:
 
     out["f_n"] = grouped["gf"].rolling(window, min_periods=1).count().reset_index(level=0, drop=True).to_numpy()
     out["last_kickoff"] = long["kickoff"].to_numpy()
-    return out
+    # Ako momcad ima dvije utakmice u istom terminu (pogreska u podacima API-ja),
+    # zadrzava se stanje nakon obje. Inace bi merge_asof birao izmedu jednakih
+    # kljuceva prema redoslijedu, a redoslijed ovisi o velicini skupa.
+    return out.drop_duplicates(["team_id", "kickoff"], keep="last")
 
 
 def _as_of_join(
@@ -187,7 +207,7 @@ def _as_of_join(
             merged[f"f_{stat}"] = np.nan
         merged["last_kickoff"] = pd.NaT
     else:
-        right = state.sort_values("kickoff").reset_index(drop=True)
+        right = state.sort_values("kickoff", kind="mergesort").reset_index(drop=True)
         merged = pd.merge_asof(
             left,
             right,
@@ -245,7 +265,7 @@ def _rolling_shots(long_shots: pd.DataFrame, kickoffs: pd.DataFrame, window: int
         return pd.DataFrame(columns=["team_id", "kickoff", *SHOT_COLS])
 
     df = long_shots.merge(kickoffs, on="fixture_id", how="left")
-    df = df.sort_values(["team_id", "kickoff"]).reset_index(drop=True)
+    df = df.sort_values(["team_id", "kickoff", "fixture_id"], kind="mergesort").reset_index(drop=True)
     grouped = df.groupby("team_id", sort=False)
     out = df[["team_id", "kickoff"]].copy()
     for col in SHOT_COLS:
@@ -253,7 +273,7 @@ def _rolling_shots(long_shots: pd.DataFrame, kickoffs: pd.DataFrame, window: int
             grouped[col].rolling(window, min_periods=1).mean()
             .reset_index(level=0, drop=True).to_numpy()
         )
-    return out
+    return out.drop_duplicates(["team_id", "kickoff"], keep="last")
 
 
 def _join_shots(targets: pd.DataFrame, state: pd.DataFrame, team_col: str, prefix: str) -> pd.DataFrame:
@@ -273,7 +293,7 @@ def _join_shots(targets: pd.DataFrame, state: pd.DataFrame, team_col: str, prefi
 
     merged = pd.merge_asof(
         left,
-        state.sort_values("kickoff").reset_index(drop=True),
+        state.sort_values("kickoff", kind="mergesort").reset_index(drop=True),
         on="kickoff",
         by="team_id",
         direction="backward",
@@ -314,7 +334,9 @@ def build_feature_matrix(
     fixtures = fixtures.copy()
     fixtures["kickoff"] = pd.to_datetime(fixtures["kickoff"], utc=True)
 
-    played = fixtures[fixtures["finished"] & fixtures["home_goals"].notna()].copy()
+    played = drop_duplicate_fixtures(
+        fixtures[fixtures["finished"] & fixtures["home_goals"].notna()]
+    ).copy()
 
     if targets is None:
         targets = played.copy()

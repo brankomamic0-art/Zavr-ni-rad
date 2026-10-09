@@ -1,8 +1,10 @@
 """Raspoređivanje dnevnih poslova (zamjena za node-cron).
 
-Dva redovita posla:
+Redoviti poslovi:
   00:05  dohvat utakmica za tekući dan, povijesti momčadi i izostanaka
   02:30  upis ishoda odigranih utakmica  ← ovo stvara oznake za učenje
+  03:15  koeficijenti
+  svaki sat  zamrzavanje predikcija za nadolazeće utakmice (prospektivna evaluacija)
 
 Uz to i nadoknada propuštenog: raspoređivač živi samo dok radi poslužitelj, pa
 bi se svaki dan kad je računalo u 00:05 bilo ugašeno trajno preskočio. Zato se
@@ -25,6 +27,7 @@ from app.config import settings
 from app.db import session_scope
 from app.models import Fixture, IngestLog
 from app.services.ingest import fetch_odds_by_date, fetch_upcoming, update_results
+from app.services.predictions import snapshot_upcoming
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +38,11 @@ STALE_AFTER_HOURS = 20
 
 # Koliko često se provjerava svježina podataka (minute).
 WATCHDOG_INTERVAL_MINUTES = 30
+
+# Koliko često se zamrzavaju predikcije za nadolazeće utakmice (minute).
+# Predikcija se do početka utakmice smije osvježiti, a posljednja spremljena
+# prije početka je ona koja ulazi u prospektivnu evaluaciju.
+SNAPSHOT_INTERVAL_MINUTES = 60
 
 # Najmanji razmak između dva pokušaja dohvata, da se pri trajnoj grešci
 # (npr. istekla kvota) ne troše pozivi u krug.
@@ -49,6 +57,11 @@ def _safe(job_name: str, fn, *args) -> None:
     except Exception as exc:  # noqa: BLE001
         # Greška u jednom pokretanju ne smije srušiti raspoređivač.
         log.exception("Posao %s nije uspio: %s", job_name, exc)
+
+
+def _snapshot() -> dict:
+    with session_scope() as db:
+        return snapshot_upcoming(db)
 
 
 def _parse_cron(value: str) -> tuple[int, int]:
@@ -184,6 +197,17 @@ def start_scheduler() -> BackgroundScheduler | None:
         replace_existing=True,
         coalesce=True,
         max_instances=1,
+    )
+
+    scheduler.add_job(
+        _safe,
+        IntervalTrigger(minutes=SNAPSHOT_INTERVAL_MINUTES),
+        args=["snapshot_predictions", _snapshot],
+        id="snapshot_predictions",
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        next_run_time=datetime.now(timezone.utc) + timedelta(minutes=2),
     )
 
     scheduler.start()

@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     # ── Baza ──
     # Prazno -> lokalni SQLite (nula konfiguracije za razvoj i pisanje rada).
     database_url: str = ""
+    # Na prvom pokretanju kopiraj priloženu backend/football.db na DATABASE_URL
+    # (Railway volumen). Isključeno po zadanom, da skripte s vlastitom bazom
+    # (npr. selftest) ne dobiju tiho kopiju prave baze.
+    seed_sqlite: bool = False
 
     # ── API-Football ──
     football_api_key: str = ""
