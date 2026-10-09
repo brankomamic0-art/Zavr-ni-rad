@@ -26,7 +26,13 @@ from sklearn.calibration import CalibratedClassifierCV
 from app.config import settings
 from app.ml.dataset import build_training_set, chronological_split
 from app.ml.evaluate import backtest, calibration_table, classification_metrics, format_report
-from app.ml.features import MODEL_FEATURES, ODDS_FEATURES, SHOT_MODEL_FEATURES, TARGETS
+from app.ml.features import (
+    MODEL_FEATURES,
+    ODDS_FEATURES,
+    SHOT_MODEL_FEATURES,
+    TARGETS,
+    has_shot_history,
+)
 from app.ml.registry import available_models, build_model
 
 log = logging.getLogger(__name__)
@@ -76,7 +82,8 @@ def train_one(
         # Varijanta s udarcima uci ISKLJUCIVO na utakmicama gdje statistika
         # stvarno postoji. Imputacija medijanom na ostalima mjerljivo steti
         # (skill 2,71 % -> 2,41 %), pa se te utakmice ne uce i ne posluzuju.
-        data = data[data["h_shots_on_f"].notna() & data["a_shots_on_f"].notna()]
+        # Prag broja utakmica je isti kao pri posluzivanju.
+        data = data[has_shot_history(data)]
     train_df, test_df = chronological_split(data, cutoff)
 
     if train_df.empty or test_df.empty:

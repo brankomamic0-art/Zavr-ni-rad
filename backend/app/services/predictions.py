@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.ml.dataset import build_serving_matrix
-from app.ml.features import ODDS_FEATURES, SHOT_FEATURES
+from app.ml.features import ODDS_FEATURES, SHOT_FEATURES, has_shot_history
 from app.models import Fixture, Prediction
 
 log = logging.getLogger(__name__)
@@ -34,11 +34,6 @@ SHOT_SUFFIX = "_shots"
 
 def _artifact_path(market: str, model_name: str) -> Path:
     return Path(settings.model_dir) / f"{market}__{model_name}.joblib"
-
-
-def _has_shot_history(row: pd.Series) -> bool:
-    """Postoji li povijest udaraca za OBJE momcadi te utakmice."""
-    return bool(pd.notna(row.get("h_shots_on_f")) and pd.notna(row.get("a_shots_on_f")))
 
 
 def load_artifact(market: str, model_name: str | None = None) -> dict[str, Any] | None:
@@ -152,7 +147,7 @@ def predict_fixtures(
     # model s udarcima pobjeđuje ondje gdje ih ima (skill 1,82 % -> 2,33 % za
     # Over 2.5), ali gubi ako se za ostale utakmice vrijednosti imputiraju.
     # Zato se ne bira jedan model za sve, nego model po utakmici.
-    has_shots = matrix.apply(_has_shot_history, axis=1)
+    has_shots = has_shot_history(matrix)
 
     for market in MARKETS:
         base_art = load_artifact(market)

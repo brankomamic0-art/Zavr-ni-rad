@@ -58,6 +58,10 @@ RECENT_FEATURES = [f"{side}_re_{stat}" for side in ("h", "a") for stat in RECENT
 SHOT_STATS = ["shots_on", "shots_total", "shots_box", "corners"]
 SHOT_COLS = [f"{stat}_{side}" for stat in SHOT_STATS for side in ("f", "a")]
 SHOT_FEATURES = [f"{side}_{col}" for side in ("h", "a") for col in SHOT_COLS]
+# Broj utakmica u prozoru za koje statistika udaraca stvarno postoji. Ne ulazi
+# u model; služi da se varijanta s udarcima koristi samo kad je prosjek
+# izračunat iz dovoljno utakmica (vidi `has_shot_history`).
+SHOT_COUNT_COLS = ["h_shots_n", "a_shots_n"]
 
 ODDS_FEATURES = ["imp_over25", "imp_btts", "odds_margin"]
 
@@ -99,6 +103,23 @@ def drop_duplicate_fixtures(fixtures: pd.DataFrame) -> pd.DataFrame:
     )
     kept = order.drop_duplicates(["home_team_id", "away_team_id", "kickoff"], keep="first")
     return fixtures.loc[fixtures.index.isin(kept.index)]
+
+
+def has_shot_history(matrix: pd.DataFrame, min_matches: int | None = None) -> pd.Series:
+    """Ima li svaka momčad dovoljno utakmica sa statistikom udaraca.
+
+    Prosjek iz jedne ili dvije utakmice nije pouzdan: Le Mans je nakon dvije
+    utakmice Ligue 1 imao 20 primljenih udaraca iz kaznenog prostora po
+    utakmici (prosjek u bazi je 7,7); sama ta značajka dodala je +1,06 logita
+    i izjednačila PSG – Le Mans s PSV – Heerenveen (oba 83 %).
+    Isto pravilo vrijedi pri treniranju i pri posluživanju.
+    """
+    min_matches = settings.min_shot_history if min_matches is None else min_matches
+    home = matrix.get("h_shots_n")
+    away = matrix.get("a_shots_n")
+    if home is None or away is None:
+        return pd.Series(False, index=matrix.index)
+    return (home.fillna(0) >= min_matches) & (away.fillna(0) >= min_matches)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -262,12 +283,16 @@ def shots_to_long(fixtures: pd.DataFrame, stats: pd.DataFrame) -> pd.DataFrame:
 def _rolling_shots(long_shots: pd.DataFrame, kickoffs: pd.DataFrame, window: int) -> pd.DataFrame:
     """Klizni prosjek udaraca po momčadi, uključujući tekući redak."""
     if long_shots.empty:
-        return pd.DataFrame(columns=["team_id", "kickoff", *SHOT_COLS])
+        return pd.DataFrame(columns=["team_id", "kickoff", "shots_n", *SHOT_COLS])
 
     df = long_shots.merge(kickoffs, on="fixture_id", how="left")
     df = df.sort_values(["team_id", "kickoff", "fixture_id"], kind="mergesort").reset_index(drop=True)
     grouped = df.groupby("team_id", sort=False)
     out = df[["team_id", "kickoff"]].copy()
+    out["shots_n"] = (
+        grouped["shots_on_f"].rolling(window, min_periods=1).count()
+        .reset_index(level=0, drop=True).to_numpy()
+    )
     for col in SHOT_COLS:
         out[col] = (
             grouped[col].rolling(window, min_periods=1).mean()
@@ -284,7 +309,7 @@ def _join_shots(targets: pd.DataFrame, state: pd.DataFrame, team_col: str, prefi
         .sort_values("kickoff")
         .reset_index(drop=True)
     )
-    rename = {c: f"{prefix}_{c}" for c in SHOT_COLS}
+    rename = {c: f"{prefix}_{c}" for c in ["shots_n", *SHOT_COLS]}
     if state.empty:
         merged = left.copy()
         for col in rename.values():
@@ -417,6 +442,8 @@ def build_feature_matrix(
     else:
         for col in SHOT_FEATURES:
             out[col] = np.nan
+        for col in SHOT_COUNT_COLS:
+            out[col] = 0.0
 
     for col in ("h_injuries", "a_injuries"):
         if col not in out.columns:
@@ -429,8 +456,12 @@ def build_feature_matrix(
     # kladionice trziste Over/Under 2.5 namiruju na 90 minuta. Ako 90-minutni
     # rezultat nije poznat, pada se natrag na konacni.
     if "home_ft" in targets.columns:
-        out["home_ft"] = targets["home_ft"]
-        out["away_ft"] = targets["away_ft"]
+        # Spaja se po ID-ju utakmice, ne po indeksu: `out` nakon spajanja ima
+        # novi indeks 0..n, a `targets` smije imati rupe (npr. nakon uklanjanja
+        # duplikata) — dodjela po indeksu bi tada pomaknula ishode na krive utakmice.
+        ft = targets.set_index("fixture_id")
+        out["home_ft"] = out["fixture_id"].map(ft["home_ft"])
+        out["away_ft"] = out["fixture_id"].map(ft["away_ft"])
         home_final = out["home_ft"].fillna(out["home_goals"])
         away_final = out["away_ft"].fillna(out["away_goals"])
     else:
