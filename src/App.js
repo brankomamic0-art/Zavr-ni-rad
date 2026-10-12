@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 // ═══════════════════════════════════════════════════════════════
 // Prediktivni sustav za analizu sportskih događaja — sučelje
@@ -344,7 +344,12 @@ export default function App() {
   const [day, setDay] = useState(todayLocal);
   const [scope, setScope] = useState("senior");
 
+  // Odgovor na stariji zahtjev (npr. za prethodno odabrani datum) ne smije
+  // prepisati noviji — zato se pamti redni broj zadnjeg zahtjeva.
+  const requestSeq = useRef(0);
+
   const load = useCallback(async (targetDay, scopeValue) => {
+    const seq = ++requestSeq.current;
     setLoading(true);
     setError("");
     try {
@@ -357,12 +362,15 @@ export default function App() {
       }
       const res = await fetch(`${API_BASE}/api/matches?${params}`);
       if (!res.ok) throw new Error(`Poslužitelj je vratio ${res.status}`);
-      setData(await res.json());
+      const payload = await res.json();
+      if (seq !== requestSeq.current) return;
+      setData(payload);
     } catch (err) {
+      if (seq !== requestSeq.current) return;
       setError(`Podaci nisu dostupni: ${err.message}`);
       setData(null);
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   }, []);
 
