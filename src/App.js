@@ -74,6 +74,19 @@ function todayLocal() {
   return new Date(d.getTime() - offsetMs).toISOString().slice(0, 10);
 }
 
+/** Danas i iduća dva dana — razdoblje za koje poslužitelj dohvaća utakmice. */
+const DAYS_AHEAD = 3;
+function upcomingDays() {
+  const base = new Date(`${todayLocal()}T12:00:00`);
+  return Array.from({ length: DAYS_AHEAD }, (_, i) => {
+    const d = new Date(base);
+    d.setDate(base.getDate() + i);
+    const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const label = i === 0 ? "Danas" : i === 1 ? "Sutra" : d.toLocaleDateString("hr-HR", { weekday: "short" });
+    return { iso, label, sub: d.toLocaleDateString("hr-HR", { day: "numeric", month: "numeric" }) };
+  });
+}
+
 /** Stvaran ishod odigrane utakmice za zadano tržište. */
 function actualOutcome(match, market) {
   const { home_goals: hg, away_goals: ag } = match;
@@ -445,6 +458,20 @@ export default function App() {
       </header>
 
       <main style={{ maxWidth: 1100, margin: "0 auto", padding: isMobile ? "14px 10px" : "22px 20px" }}>
+        {/* Odabir dana */}
+        <div style={{ display: "flex", gap: 6, marginBottom: 12, overflowX: "auto" }}>
+          {upcomingDays().map((d) => (
+            <button
+              key={d.iso}
+              onClick={() => setDay(d.iso)}
+              style={{ flex: "1 0 64px", padding: "7px 6px", borderRadius: 8, cursor: "pointer", textAlign: "center", background: day === d.iso ? "rgba(16,185,129,0.12)" : "rgba(255,255,255,0.02)", border: `1px solid ${day === d.iso ? "rgba(16,185,129,0.35)" : C.line}`, color: day === d.iso ? C.green : C.faint }}
+            >
+              <div style={{ fontSize: 12, fontWeight: 600, textTransform: "capitalize" }}>{d.label}</div>
+              <div style={{ fontSize: 9, fontFamily: MONO }}>{d.sub}</div>
+            </button>
+          ))}
+        </div>
+
         {/* Odabir tržišta */}
         <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "repeat(4,1fr)", gap: 6, marginBottom: 12 }}>
           {MARKETS.map((m) => (

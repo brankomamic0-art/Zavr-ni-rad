@@ -1,7 +1,7 @@
 """Raspoređivanje dnevnih poslova (zamjena za node-cron).
 
 Redoviti poslovi:
-  00:05  dohvat utakmica za tekući dan, povijesti momčadi i izostanaka
+  00:05  dohvat utakmica za danas i iduća 2 dana, povijesti momčadi i izostanaka
   02:30  upis ishoda odigranih utakmica  ← ovo stvara oznake za učenje
   03:15  koeficijenti
   svaki sat  zamrzavanje predikcija za nadolazeće utakmice (prospektivna evaluacija)
@@ -24,9 +24,9 @@ from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import func, select
 
 from app.config import settings
-from app.db import session_scope
+from app.db import local_day_bounds, local_today, session_scope
 from app.models import Fixture, IngestLog
-from app.services.ingest import fetch_odds_by_date, fetch_upcoming, update_results
+from app.services.ingest import fetch_odds_by_date, fetch_upcoming_days, update_results
 from app.services.predictions import snapshot_upcoming
 
 log = logging.getLogger(__name__)
@@ -70,9 +70,13 @@ def _parse_cron(value: str) -> tuple[int, int]:
 
 
 def needs_daily_fetch() -> tuple[bool, str]:
-    """Jesu li podaci za današnji dan svježi? Vraća (treba li dohvat, razlog)."""
+    """Jesu li podaci za idućih N dana svježi? Vraća (treba li dohvat, razlog)."""
     now = datetime.now(timezone.utc)
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today = local_today()
+    start, end = local_day_bounds(today)
+    # Zadnji dan prozora: ako je prazan, raniji dohvat nije pokrio cijeli
+    # prozor (npr. prije uvođenja dohvata unaprijed) i treba ga ponoviti.
+    last_start, last_end = local_day_bounds(today + timedelta(days=settings.fetch_days_ahead - 1))
 
     def _age_hours(value: datetime | None) -> float | None:
         if value is None:
@@ -83,8 +87,11 @@ def needs_daily_fetch() -> tuple[bool, str]:
 
     with session_scope() as db:
         today_count = db.scalar(
+            select(func.count(Fixture.id)).where(Fixture.kickoff >= start, Fixture.kickoff < end)
+        ) or 0
+        last_day_count = db.scalar(
             select(func.count(Fixture.id)).where(
-                Fixture.kickoff >= start, Fixture.kickoff < start + timedelta(days=1)
+                Fixture.kickoff >= last_start, Fixture.kickoff < last_end
             )
         ) or 0
         last_ok = db.scalar(
@@ -111,6 +118,8 @@ def needs_daily_fetch() -> tuple[bool, str]:
 
     if today_count == 0:
         return True, "nema utakmica za danas u bazi"
+    if last_day_count == 0:
+        return True, f"nema utakmica za {settings.fetch_days_ahead}. dan unaprijed"
     if ok_age is None:
         return True, "nema zabiljezenog uspjesnog dohvata"
     if ok_age > STALE_AFTER_HOURS:
@@ -136,7 +145,7 @@ def _watchdog() -> None:
         log.debug("Provjera svjezine: %s", reason)
         return
     log.info("Provjera svjezine je pokrenula dohvat: %s", reason)
-    _safe("fetch_upcoming (provjera svjezine)", fetch_upcoming)
+    _safe("fetch_upcoming (provjera svjezine)", fetch_upcoming_days)
     _safe("update_results (provjera svjezine)", update_results)
 
 
@@ -159,7 +168,7 @@ def start_scheduler() -> BackgroundScheduler | None:
     scheduler.add_job(
         _safe,
         CronTrigger(hour=fetch_hour, minute=fetch_min, timezone=settings.timezone),
-        args=["fetch_upcoming", fetch_upcoming],
+        args=["fetch_upcoming", fetch_upcoming_days],
         id="fetch_upcoming",
         replace_existing=True,
         # `None` = izvrsi propusteni termin bez obzira na kasnjenje. Uz
@@ -230,7 +239,7 @@ def start_scheduler() -> BackgroundScheduler | None:
         scheduler.add_job(
             _safe,
             DateTrigger(run_date=datetime.now(timezone.utc) + timedelta(seconds=10)),
-            args=["fetch_upcoming (nadoknada)", fetch_upcoming],
+            args=["fetch_upcoming (nadoknada)", fetch_upcoming_days],
             id="catchup_fetch",
             replace_existing=True,
         )

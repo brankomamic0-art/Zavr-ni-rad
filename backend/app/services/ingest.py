@@ -4,7 +4,8 @@ Tri posla čine sloj podataka:
 
 1. `backfill_history()`  — jednokratno povlačenje više sezona po ligama.
                            Ovo stvara skup za treniranje.
-2. `fetch_upcoming()`    — dnevno, utakmice za zadani datum + koeficijenti + ozljede.
+2. `fetch_upcoming()`    — dnevno, utakmice za zadani datum + koeficijenti + ozljede
+                           (`fetch_upcoming_days()` to ponavlja za danas i iduća 2 dana).
 3. `update_results()`    — dnevno, upisuje ishode odigranih utakmica.
                            Ovo stvara OZNAKE (labels) bez kojih nema učenja.
 """
@@ -14,6 +15,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -153,8 +155,11 @@ def _upsert_team(db: Session, raw: dict, country: str | None = None) -> int:
 
 
 def _parse_kickoff(raw: str) -> datetime:
-    # API vraća ISO 8601 s pomakom, npr. 2024-08-16T20:00:00+02:00
-    return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    # API vraća ISO 8601 s pomakom, npr. 2024-08-16T20:00:00+02:00. Pomak ovisi
+    # o upitu (dohvat po datumu traži lokalnu zonu, ostali vraćaju UTC), a
+    # SQLite pomak odbacuje — zato se uvijek sprema UTC, inače bi ista utakmica
+    # ovisno o izvoru bila upisana s razlikom od sat-dva.
+    return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
 def _upsert_fixture(db: Session, item: dict) -> Fixture:
@@ -315,7 +320,7 @@ def fetch_upcoming(
             Bez toga nema forme, pa ni predikcija — nove momčadi u bazi imaju
             prazan prozor.
     """
-    target_date = target_date or datetime.now().date()
+    target_date = target_date or datetime.now(ZoneInfo(settings.timezone)).date()
     date_str = target_date.isoformat()
     started = datetime.now(timezone.utc)
     fixture_ids: list[int] = []
@@ -378,6 +383,33 @@ def fetch_upcoming(
     return {"date": date_str, "fixtures": len(fixture_ids), "api_calls": api_calls}
 
 
+def fetch_upcoming_days(days: int | None = None, **kwargs: Any) -> dict[str, Any]:
+    """Dohvaća utakmice za danas i idućih `days - 1` dana.
+
+    Predikcije se tako mogu izdati unaprijed, a ne samo za tekući dan. Svaki
+    dan se dohvaća zasebno (jedan poziv po danu); povijest momčadi se za većinu
+    momčadi preskače jer je već u bazi, pa ponovni dohvat svaki dan malo stoji.
+    Greška za jedan dan ne prekida ostale.
+    """
+    days = days or settings.fetch_days_ahead
+    today = datetime.now(ZoneInfo(settings.timezone)).date()
+    per_day: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for offset in range(days):
+        day = today + timedelta(days=offset)
+        try:
+            per_day.append(fetch_upcoming(day, **kwargs))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Dohvat za %s nije uspio: %s", day, exc)
+            errors.append(f"{day}: {exc}")
+    return {
+        "days": days,
+        "fixtures": sum(d["fixtures"] for d in per_day),
+        "api_calls": sum(d["api_calls"] for d in per_day),
+        "errors": errors,
+    }
+
+
 def fetch_team_history(
     client: ApiFootballClient,
     team_ids: list[int],
@@ -392,6 +424,9 @@ def fetch_team_history(
     """
     if min_existing is None:
         min_existing = max(settings.form_window_overall, settings.form_window_venue) + 4
+    # Dohvat vraća najviše `last` utakmica, pa prag iznad toga nikad ne bi bio
+    # dosegnut i ista bi se momčad dohvaćala iznova pri svakom pokretanju.
+    min_existing = min(min_existing, last)
 
     # Koliko odigranih utakmica svaka momčad već ima u bazi.
     with session_scope() as db:

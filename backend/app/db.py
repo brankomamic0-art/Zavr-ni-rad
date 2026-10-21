@@ -6,7 +6,9 @@ import logging
 import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
@@ -83,3 +85,19 @@ def init_db() -> None:
     from app import models  # noqa: F401  (registrira tablice)
 
     models.Base.metadata.create_all(bind=engine)
+
+
+def local_day_bounds(day: date) -> tuple[datetime, datetime]:
+    """Početak i kraj kalendarskog dana u zoni sustava, izraženi u UTC.
+
+    Utakmice se spremaju u UTC, a "dan" za korisnika je lokalni dan — bez ove
+    pretvorbe bi utakmice između ponoći i 2 ujutro završile na prethodnom danu.
+    """
+    zone = ZoneInfo(settings.timezone)
+    start = datetime.combine(day, time.min, tzinfo=zone)
+    end = datetime.combine(day + timedelta(days=1), time.min, tzinfo=zone)
+    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+
+
+def local_today() -> date:
+    return datetime.now(ZoneInfo(settings.timezone)).date()

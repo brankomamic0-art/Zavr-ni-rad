@@ -7,7 +7,7 @@ Sustav je javan i bez prijave — stranica pri otvaranju odmah traži
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db import get_db
+from app.db import get_db, local_day_bounds, local_today
 from app.ml.dataset import build_serving_matrix
 from app.ml.prospective import evaluate_prospective
 from app.models import Fixture, IngestLog, Injury, League, Odd, Team
@@ -40,6 +40,10 @@ def _jsonable(value):
     if callable(item):
         value = value.item()
     return None if pd.isna(value) else value
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
 @router.get("/health")
@@ -71,12 +75,11 @@ def get_matches(
 ) -> MatchesResponse:
     """Utakmice zadanog dana s predikcijama, formom, koeficijentima i ozljedama."""
     try:
-        target_day = date.fromisoformat(day) if day else datetime.now().date()
+        target_day = date.fromisoformat(day) if day else local_today()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Neispravan datum, ocekujem YYYY-MM-DD") from exc
 
-    start = datetime.combine(target_day, datetime.min.time(), tzinfo=timezone.utc)
-    end = start + timedelta(days=1)
+    start, end = local_day_bounds(target_day)
 
     stmt = (
         select(Fixture)
@@ -158,7 +161,9 @@ def get_matches(
         matches.append(
             {
                 "id": fx.id,
-                "kickoff": fx.kickoff,
+                # SQLite ne čuva zonu; bez nje bi preglednik UTC vrijeme
+                # protumačio kao lokalno.
+                "kickoff": _as_utc(fx.kickoff),
                 "status": fx.status,
                 "category": category,
                 "league": {
@@ -197,15 +202,14 @@ def get_matches(
 
 @router.get("/status", response_model=StatusResponse)
 def get_status(db: Session = Depends(get_db)) -> StatusResponse:
-    today = datetime.now().date()
-    start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+    start, end = local_day_bounds(local_today())
 
     total = db.scalar(select(func.count(Fixture.id))) or 0
     finished = db.scalar(select(func.count(Fixture.id)).where(Fixture.finished.is_(True))) or 0
     today_count = (
         db.scalar(
             select(func.count(Fixture.id)).where(
-                Fixture.kickoff >= start, Fixture.kickoff < start + timedelta(days=1)
+                Fixture.kickoff >= start, Fixture.kickoff < end
             )
         )
         or 0
@@ -279,7 +283,7 @@ def get_fixture(fixture_id: int, db: Session = Depends(get_db)) -> dict:
 
     return {
         "id": fx.id,
-        "kickoff": fx.kickoff,
+        "kickoff": _as_utc(fx.kickoff),
         "home": fx.home_team.name,
         "away": fx.away_team.name,
         "league": fx.league.name,

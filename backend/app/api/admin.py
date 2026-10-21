@@ -12,7 +12,12 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
 
 from app.config import settings
 from app.services import predictions as pred_service
-from app.services.ingest import backfill_history, fetch_upcoming, update_results
+from app.services.ingest import (
+    backfill_history,
+    fetch_upcoming,
+    fetch_upcoming_days,
+    update_results,
+)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -31,11 +36,16 @@ def trigger_fetch(
     background: BackgroundTasks,
     x_admin_token: str | None = Header(default=None),
     day: str | None = Query(default=None, alias="date"),
+    days: int | None = Query(default=None, ge=1, le=14, description="Bez datuma: danas + N-1 dana"),
 ) -> dict:
+    """S datumom dohvaća taj jedan dan, inače danas i idućih dana."""
     _require_token(x_admin_token)
-    target = date.fromisoformat(day) if day else None
-    background.add_task(fetch_upcoming, target)
-    return {"queued": "fetch_upcoming", "date": day or "danas"}
+    if day:
+        background.add_task(fetch_upcoming, date.fromisoformat(day))
+        return {"queued": "fetch_upcoming", "date": day}
+    days = days or settings.fetch_days_ahead
+    background.add_task(fetch_upcoming_days, days)
+    return {"queued": "fetch_upcoming_days", "days": days}
 
 
 @router.post("/update-results")

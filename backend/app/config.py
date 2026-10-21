@@ -65,7 +65,10 @@ class Settings(BaseSettings):
     # ── Raspored (APScheduler) ──
     timezone: str = "Europe/Zagreb"
     enable_scheduler: bool = True
-    daily_fixtures_cron: str = "5 0"    # 00:05 — dohvat današnjih utakmica
+    daily_fixtures_cron: str = "5 0"    # 00:05 — dohvat utakmica za idućih N dana
+    # Za koliko dana unaprijed (uključujući danas) se dohvaćaju utakmice i
+    # izdaju predikcije.
+    fetch_days_ahead: int = 3  # danas + 2 dana unaprijed
     daily_results_cron: str = "30 2"    # 02:30 — upis ishoda jučerašnjih utakmica
     daily_odds_cron: str = "15 3"       # 03:15 — koeficijenti (7 dana unatrag + 2 unaprijed)
     # Koeficijenti se dohvaćaju po datumu (10 utakmica po pozivu). API čuva
