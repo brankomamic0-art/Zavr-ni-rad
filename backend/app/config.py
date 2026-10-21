@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     # ── Baza ──
     # Prazno -> lokalni SQLite (nula konfiguracije za razvoj i pisanje rada).
     database_url: str = ""
+    # Na prvom pokretanju kopiraj priloženu backend/football.db na DATABASE_URL
+    # (Railway volumen). Isključeno po zadanom, da skripte s vlastitom bazom
+    # (npr. selftest) ne dobiju tiho kopiju prave baze.
+    seed_sqlite: bool = False
 
     # ── API-Football ──
     football_api_key: str = ""
@@ -45,6 +49,12 @@ class Settings(BaseSettings):
     # uopće izdala predikcija. Momčad s dvije odigrane utakmice može imati 2/2
     # na Over 2.5, što izgleda kao 100 % a nije nikakav dokaz.
     serving_min_history: int = 5
+    # Najmanji broj utakmica sa statistikom udaraca (za obje momčadi) da bi se
+    # koristio model s udarcima; inače se koristi osnovni model. Izmjereno na
+    # retrospektivnom testu: prag 1/3/5/8 daje skill za Over 2.5 od
+    # 2,76/2,71/2,72/2,72 % — razlika je u šumu, a prag sprječava procjene iz
+    # prosjeka jedne ili dvije utakmice.
+    min_shot_history: int = 5
 
     # ── ML ──
     model_dir: str = str(BASE_DIR / "models")

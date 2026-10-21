@@ -35,7 +35,7 @@ import pandas as pd  # noqa: E402
 
 from app.config import settings  # noqa: E402
 from app.db import init_db, session_scope  # noqa: E402
-from app.ml.dataset import build_training_set, chronological_split  # noqa: E402
+from app.ml.dataset import build_training_set, chronological_split, load_fixtures  # noqa: E402
 from app.ml.evaluate import classification_metrics  # noqa: E402
 from app.ml.features import MODEL_FEATURES, build_feature_matrix  # noqa: E402
 from app.ml.registry import build_model  # noqa: E402
@@ -103,9 +103,25 @@ def generate() -> None:
                             finished=True,
                             home_goals=hg,
                             away_goals=ag,
+                            home_ft=hg,
+                            away_ft=ag,
                         )
                     )
                     fixture_id += 1
+
+        # API ponekad istu utakmicu vodi dvaput pod drugim ID-jem. Duplikat se
+        # mora ukloniti, a ishodi ostalih utakmica ne smiju se pritom pomaknuti.
+        db.flush()
+        original = db.get(Fixture, 500)
+        db.add(
+            Fixture(
+                id=999_999, league_id=1, season=original.season, kickoff=original.kickoff,
+                home_team_id=original.home_team_id, away_team_id=original.away_team_id,
+                status="FT", finished=True,
+                home_goals=original.home_goals, away_goals=original.away_goals,
+                home_ft=original.home_ft, away_ft=original.away_ft,
+            )
+        )
     print(f"        Generirano {fixture_id - 1} utakmica, {N_TEAMS} momcadi, {N_SEASONS} sezona\n")
 
 
@@ -129,6 +145,15 @@ def test_features() -> pd.DataFrame:
         "ciljne varijable su binarne",
         f"over25={df['y_over25'].mean():.3f}, btts={df['y_btts'].mean():.3f}",
     )
+    # Oznaka mora odgovarati rezultatu ISTE utakmice (nakon duplikata u
+    # podacima su se ishodi jednom pomaknuli na susjedne retke).
+    fixtures = load_fixtures(finished_only=True).set_index("fixture_id")
+    goals = fixtures.loc[df["fixture_id"], ["home_goals", "away_goals"]].sum(axis=1).to_numpy()
+    check(
+        np.array_equal(df["y_over25"].to_numpy(), (goals > 2.5).astype(float)),
+        "oznake odgovaraju rezultatu vlastite utakmice",
+    )
+    check(999_999 not in set(df["fixture_id"]), "duplikat utakmice je uklonjen")
     print()
     return df
 
@@ -137,9 +162,10 @@ def test_no_leakage(df: pd.DataFrame) -> None:
     """Ključna provjera rada: rucni preracun forme za nasumicne utakmice."""
     print("2) Odsutnost curenja podataka (point-in-time ispravnost)")
 
-    from app.ml.dataset import load_fixtures
+    from app.ml.features import drop_duplicate_fixtures
 
-    fixtures = load_fixtures(finished_only=True)
+    # Rucni preracun polazi od istih (dedupliciranih) utakmica kao i cjevovod.
+    fixtures = drop_duplicate_fixtures(load_fixtures(finished_only=True))
     rng = random.Random(7)
     sample = df.sample(min(40, len(df)), random_state=1)
 

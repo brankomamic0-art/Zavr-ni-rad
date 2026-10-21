@@ -9,7 +9,7 @@ modela ili tek statistički prosjek.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +20,8 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.ml.dataset import build_serving_matrix
-from app.ml.features import ODDS_FEATURES, SHOT_FEATURES
-from app.models import Prediction
+from app.ml.features import ODDS_FEATURES, SHOT_FEATURES, has_shot_history
+from app.models import Fixture, Prediction
 
 log = logging.getLogger(__name__)
 
@@ -34,11 +34,6 @@ SHOT_SUFFIX = "_shots"
 
 def _artifact_path(market: str, model_name: str) -> Path:
     return Path(settings.model_dir) / f"{market}__{model_name}.joblib"
-
-
-def _has_shot_history(row: pd.Series) -> bool:
-    """Postoji li povijest udaraca za OBJE momcadi te utakmice."""
-    return bool(pd.notna(row.get("h_shots_on_f")) and pd.notna(row.get("a_shots_on_f")))
 
 
 def load_artifact(market: str, model_name: str | None = None) -> dict[str, Any] | None:
@@ -152,7 +147,7 @@ def predict_fixtures(
     # model s udarcima pobjeđuje ondje gdje ih ima (skill 1,82 % -> 2,33 % za
     # Over 2.5), ali gubi ako se za ostale utakmice vrijednosti imputiraju.
     # Zato se ne bira jedan model za sve, nego model po utakmici.
-    has_shots = matrix.apply(_has_shot_history, axis=1)
+    has_shots = has_shot_history(matrix)
 
     for market in MARKETS:
         base_art = load_artifact(market)
@@ -211,9 +206,35 @@ def predict_fixtures(
     return results
 
 
-def _persist(db: Session, matrix: pd.DataFrame, results: dict[int, dict]) -> None:
-    """Sprema izdanu predikciju radi kasnije poštene (prospektivne) evaluacije."""
+def _as_utc(value: datetime) -> datetime:
+    # SQLite vraća datume bez zone; u bazu se uvijek upisuje UTC.
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+def _persist(db: Session, matrix: pd.DataFrame, results: dict[int, dict]) -> int:
+    """Sprema izdanu predikciju radi kasnije poštene (prospektivne) evaluacije.
+
+    Sprema se samo za utakmice koje još nisu počele. Do početka se zapis smije
+    osvježiti (npr. nakon novih ozljeda), a od početka je zaključan — tako je
+    ono što se kasnije evaluira doista ono što je model tvrdio PRIJE utakmice.
+    Po utakmici i tržištu čuva se jedan zapis: predikcija koju je sustav
+    stvarno poslužio, bez obzira na to koji ju je model dao.
+    """
+    now = datetime.now(timezone.utc)
+    kickoffs = dict(
+        db.execute(select(Fixture.id, Fixture.kickoff).where(Fixture.id.in_(list(results)))).all()
+    )
+    saved = 0
     for fixture_id, payload in results.items():
+        kickoff = kickoffs.get(fixture_id)
+        if kickoff is None or _as_utc(kickoff) <= now:
+            continue
+        row = matrix.loc[fixture_id]
+        features = {
+            k: (None if pd.isna(v) else float(v))
+            for k, v in row.items()
+            if isinstance(v, (int, float, np.floating)) and k not in ODDS_FEATURES
+        }
         for market in MARKETS:
             entry = payload["markets"].get(market) or {}
             prob = entry.get("p")
@@ -223,28 +244,39 @@ def _persist(db: Session, matrix: pd.DataFrame, results: dict[int, dict]) -> Non
                 select(Prediction).where(
                     Prediction.fixture_id == fixture_id,
                     Prediction.market == market,
-                    Prediction.model_name == entry["source"],
                 )
             )
-            if existing:
-                existing.probability = prob
-                continue
-            row = matrix.loc[fixture_id]
-            db.add(
-                Prediction(
-                    fixture_id=fixture_id,
-                    market=market,
-                    model_name=entry["source"],
-                    probability=prob,
-                    features={
-                        k: (None if pd.isna(v) else float(v))
-                        for k, v in row.items()
-                        if isinstance(v, (int, float, np.floating)) and k not in ODDS_FEATURES
-                    },
-                    created_at=datetime.now(timezone.utc),
-                )
-            )
+            if existing is None:
+                existing = Prediction(fixture_id=fixture_id, market=market)
+                db.add(existing)
+            existing.model_name = entry["source"]
+            existing.probability = prob
+            existing.features = features
+            existing.created_at = now
+            saved += 1
     db.commit()
+    return saved
+
+
+def snapshot_upcoming(db: Session, horizon_hours: int = 36) -> dict[str, int]:
+    """Zamrzava predikcije za utakmice koje počinju u idućih `horizon_hours` sati."""
+    now = datetime.now(timezone.utc)
+    fixture_ids = list(
+        db.scalars(
+            select(Fixture.id).where(
+                Fixture.finished.is_(False),
+                Fixture.kickoff > now,
+                Fixture.kickoff <= now + timedelta(hours=horizon_hours),
+            )
+        )
+    )
+    if not fixture_ids:
+        return {"fixtures": 0, "saved": 0}
+    results = predict_fixtures(db, fixture_ids, persist=True)
+    saved = sum(
+        1 for payload in results.values() for m in MARKETS if payload["markets"][m]["p"] is not None
+    )
+    return {"fixtures": len(fixture_ids), "saved": saved}
 
 
 def form_block(matrix_row: pd.Series) -> dict[str, Any]:

@@ -58,6 +58,10 @@ RECENT_FEATURES = [f"{side}_re_{stat}" for side in ("h", "a") for stat in RECENT
 SHOT_STATS = ["shots_on", "shots_total", "shots_box", "corners"]
 SHOT_COLS = [f"{stat}_{side}" for stat in SHOT_STATS for side in ("f", "a")]
 SHOT_FEATURES = [f"{side}_{col}" for side in ("h", "a") for col in SHOT_COLS]
+# Broj utakmica u prozoru za koje statistika udaraca stvarno postoji. Ne ulazi
+# u model; služi da se varijanta s udarcima koristi samo kad je prosjek
+# izračunat iz dovoljno utakmica (vidi `has_shot_history`).
+SHOT_COUNT_COLS = ["h_shots_n", "a_shots_n"]
 
 ODDS_FEATURES = ["imp_over25", "imp_btts", "odds_margin"]
 
@@ -82,6 +86,40 @@ TARGETS = {
     "over25": "y_over25",
     "btts": "y_btts",
 }
+
+
+def drop_duplicate_fixtures(fixtures: pd.DataFrame) -> pd.DataFrame:
+    """Uklanja utakmice koje API vodi dvaput pod različitim ID-jem.
+
+    Ista utakmica (isti domaćin, gost i termin) ponekad postoji u dva
+    natjecanja ili pod starim i novim ID-jem. U formi bi se tada brojala
+    dvaput, a u skupu za treniranje bila bi dva jednaka primjera. Zadržava se
+    zapis s najmanjim ID-jem, s prednošću odigranog.
+    """
+    if fixtures.empty:
+        return fixtures
+    order = fixtures.assign(_played=fixtures["home_goals"].notna()).sort_values(
+        ["_played", "fixture_id"], ascending=[False, True], kind="mergesort"
+    )
+    kept = order.drop_duplicates(["home_team_id", "away_team_id", "kickoff"], keep="first")
+    return fixtures.loc[fixtures.index.isin(kept.index)]
+
+
+def has_shot_history(matrix: pd.DataFrame, min_matches: int | None = None) -> pd.Series:
+    """Ima li svaka momčad dovoljno utakmica sa statistikom udaraca.
+
+    Prosjek iz jedne ili dvije utakmice nije pouzdan: Le Mans je nakon dvije
+    utakmice Ligue 1 imao 20 primljenih udaraca iz kaznenog prostora po
+    utakmici (prosjek u bazi je 7,7); sama ta značajka dodala je +1,06 logita
+    i izjednačila PSG – Le Mans s PSV – Heerenveen (oba 83 %).
+    Isto pravilo vrijedi pri treniranju i pri posluživanju.
+    """
+    min_matches = settings.min_shot_history if min_matches is None else min_matches
+    home = matrix.get("h_shots_n")
+    away = matrix.get("a_shots_n")
+    if home is None or away is None:
+        return pd.Series(False, index=matrix.index)
+    return (home.fillna(0) >= min_matches) & (away.fillna(0) >= min_matches)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -129,7 +167,7 @@ def to_long_frame(fixtures: pd.DataFrame) -> pd.DataFrame:
     long["fts"] = (long["gf"] == 0).astype(float)          # failed to score
     long["pts"] = np.where(long["gf"] > long["ga"], 3.0, np.where(long["gf"] == long["ga"], 1.0, 0.0))
 
-    return long.sort_values(["team_id", "kickoff"]).reset_index(drop=True)
+    return long.sort_values(["team_id", "kickoff", "fixture_id"], kind="mergesort").reset_index(drop=True)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -146,7 +184,7 @@ def _rolling_state(long: pd.DataFrame, window: int) -> pd.DataFrame:
         cols = ["team_id", "kickoff", *[f"f_{s}" for s in BASE_STATS], "f_n"]
         return pd.DataFrame(columns=cols)
 
-    long = long.sort_values(["team_id", "kickoff"]).reset_index(drop=True)
+    long = long.sort_values(["team_id", "kickoff", "fixture_id"], kind="mergesort").reset_index(drop=True)
     grouped = long.groupby("team_id", sort=False)
     out = long[["team_id", "kickoff"]].copy()
 
@@ -162,7 +200,10 @@ def _rolling_state(long: pd.DataFrame, window: int) -> pd.DataFrame:
 
     out["f_n"] = grouped["gf"].rolling(window, min_periods=1).count().reset_index(level=0, drop=True).to_numpy()
     out["last_kickoff"] = long["kickoff"].to_numpy()
-    return out
+    # Ako momcad ima dvije utakmice u istom terminu (pogreska u podacima API-ja),
+    # zadrzava se stanje nakon obje. Inace bi merge_asof birao izmedu jednakih
+    # kljuceva prema redoslijedu, a redoslijed ovisi o velicini skupa.
+    return out.drop_duplicates(["team_id", "kickoff"], keep="last")
 
 
 def _as_of_join(
@@ -187,7 +228,7 @@ def _as_of_join(
             merged[f"f_{stat}"] = np.nan
         merged["last_kickoff"] = pd.NaT
     else:
-        right = state.sort_values("kickoff").reset_index(drop=True)
+        right = state.sort_values("kickoff", kind="mergesort").reset_index(drop=True)
         merged = pd.merge_asof(
             left,
             right,
@@ -242,18 +283,22 @@ def shots_to_long(fixtures: pd.DataFrame, stats: pd.DataFrame) -> pd.DataFrame:
 def _rolling_shots(long_shots: pd.DataFrame, kickoffs: pd.DataFrame, window: int) -> pd.DataFrame:
     """Klizni prosjek udaraca po momčadi, uključujući tekući redak."""
     if long_shots.empty:
-        return pd.DataFrame(columns=["team_id", "kickoff", *SHOT_COLS])
+        return pd.DataFrame(columns=["team_id", "kickoff", "shots_n", *SHOT_COLS])
 
     df = long_shots.merge(kickoffs, on="fixture_id", how="left")
-    df = df.sort_values(["team_id", "kickoff"]).reset_index(drop=True)
+    df = df.sort_values(["team_id", "kickoff", "fixture_id"], kind="mergesort").reset_index(drop=True)
     grouped = df.groupby("team_id", sort=False)
     out = df[["team_id", "kickoff"]].copy()
+    out["shots_n"] = (
+        grouped["shots_on_f"].rolling(window, min_periods=1).count()
+        .reset_index(level=0, drop=True).to_numpy()
+    )
     for col in SHOT_COLS:
         out[col] = (
             grouped[col].rolling(window, min_periods=1).mean()
             .reset_index(level=0, drop=True).to_numpy()
         )
-    return out
+    return out.drop_duplicates(["team_id", "kickoff"], keep="last")
 
 
 def _join_shots(targets: pd.DataFrame, state: pd.DataFrame, team_col: str, prefix: str) -> pd.DataFrame:
@@ -264,7 +309,7 @@ def _join_shots(targets: pd.DataFrame, state: pd.DataFrame, team_col: str, prefi
         .sort_values("kickoff")
         .reset_index(drop=True)
     )
-    rename = {c: f"{prefix}_{c}" for c in SHOT_COLS}
+    rename = {c: f"{prefix}_{c}" for c in ["shots_n", *SHOT_COLS]}
     if state.empty:
         merged = left.copy()
         for col in rename.values():
@@ -273,7 +318,7 @@ def _join_shots(targets: pd.DataFrame, state: pd.DataFrame, team_col: str, prefi
 
     merged = pd.merge_asof(
         left,
-        state.sort_values("kickoff").reset_index(drop=True),
+        state.sort_values("kickoff", kind="mergesort").reset_index(drop=True),
         on="kickoff",
         by="team_id",
         direction="backward",
@@ -314,7 +359,9 @@ def build_feature_matrix(
     fixtures = fixtures.copy()
     fixtures["kickoff"] = pd.to_datetime(fixtures["kickoff"], utc=True)
 
-    played = fixtures[fixtures["finished"] & fixtures["home_goals"].notna()].copy()
+    played = drop_duplicate_fixtures(
+        fixtures[fixtures["finished"] & fixtures["home_goals"].notna()]
+    ).copy()
 
     if targets is None:
         targets = played.copy()
@@ -395,6 +442,8 @@ def build_feature_matrix(
     else:
         for col in SHOT_FEATURES:
             out[col] = np.nan
+        for col in SHOT_COUNT_COLS:
+            out[col] = 0.0
 
     for col in ("h_injuries", "a_injuries"):
         if col not in out.columns:
@@ -407,8 +456,12 @@ def build_feature_matrix(
     # kladionice trziste Over/Under 2.5 namiruju na 90 minuta. Ako 90-minutni
     # rezultat nije poznat, pada se natrag na konacni.
     if "home_ft" in targets.columns:
-        out["home_ft"] = targets["home_ft"]
-        out["away_ft"] = targets["away_ft"]
+        # Spaja se po ID-ju utakmice, ne po indeksu: `out` nakon spajanja ima
+        # novi indeks 0..n, a `targets` smije imati rupe (npr. nakon uklanjanja
+        # duplikata) — dodjela po indeksu bi tada pomaknula ishode na krive utakmice.
+        ft = targets.set_index("fixture_id")
+        out["home_ft"] = out["fixture_id"].map(ft["home_ft"])
+        out["away_ft"] = out["fixture_id"].map(ft["away_ft"])
         home_final = out["home_ft"].fillna(out["home_goals"])
         away_final = out["away_ft"].fillna(out["away_goals"])
     else:

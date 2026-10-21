@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db import engine
-from app.ml.features import attach_odds_features, build_feature_matrix
+from app.ml.features import attach_odds_features, build_feature_matrix, drop_duplicate_fixtures
 
 log = logging.getLogger(__name__)
 
@@ -128,10 +128,10 @@ def build_training_set(
         log.warning("Baza ne sadrži nijednu odigranu utakmicu — pokreni backfill.")
         return pd.DataFrame()
 
+    # Utakmica koju API vodi dvaput bila bi dva jednaka primjera za učenje.
+    targets = drop_duplicate_fixtures(fixtures)
     if since is not None:
-        targets = fixtures[fixtures["kickoff"] >= pd.Timestamp(since, tz="UTC")]
-    else:
-        targets = fixtures
+        targets = targets[targets["kickoff"] >= pd.Timestamp(since, tz="UTC")]
 
     matrix = build_feature_matrix(fixtures, targets=targets, stats=load_fixture_stats())
     if matrix.empty:
